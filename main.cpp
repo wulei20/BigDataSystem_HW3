@@ -95,6 +95,8 @@ int main(int argc, char *argv[]) {
             for (i = 0; i < count; i++) {
                 if (res2[i] != res[i]) {
                     correctness = 0;
+                    printf("error at %d, %d != %d\n", i, res2[i], res[i]);
+                    break;
                 }
             }
             if (correctness == 0)
