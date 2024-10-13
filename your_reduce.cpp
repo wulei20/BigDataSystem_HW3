@@ -56,7 +56,7 @@ void YOUR_Reduce(const int *sendbuf, int *recvbuf, int count) {
 #else 
     // #define PARALLEL_BY_INDEX
     #ifndef PARALLEL_BY_INDEX
-        #define USE_OPENMP
+        // #define USE_OPENMP
         #ifndef USE_OPENMP
             int rank, size;
             
@@ -64,33 +64,53 @@ void YOUR_Reduce(const int *sendbuf, int *recvbuf, int count) {
             MPI_Comm_rank(MPI_COMM_WORLD, &rank);
             MPI_Comm_size(MPI_COMM_WORLD, &size);
             
-            // Step 1: Initialize the recvbuf with sendbuf data (local sum)
-            for (int i = 0; i < count; i++) {
-                recvbuf[i] = sendbuf[i];
+            // Special case for size = 2
+            if (size == 2) {
+                if (rank == 0) {
+                    MPI_Recv(recvbuf, count, MPI_INT, 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                    for (int i = 0; i < count; i++) {
+                        recvbuf[i] += sendbuf[i];
+                    }
+                } else {
+                    // Process 1 sends its data to process 0
+                    MPI_Send(sendbuf, count, MPI_INT, 0, 0, MPI_COMM_WORLD);
+                }
+                return;
             }
 
-            // Step 2: Binary tree reduction process
+            // Binary tree reduction process
             int step = 1;
+            int *tempbuf = (int *)malloc(sizeof(int) * count);
+            bool init_recv = false;
             while (step < size) {
                 if (rank % (2 * step) == 0) {
                     // This process will receive from its pair (rank + step)
                     if (rank + step < size) {
-                        int *tempbuf = (int *)malloc(sizeof(int) * count);
                         MPI_Recv(tempbuf, count, MPI_INT, rank + step, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-                        
-                        // Sum the received buffer into recvbuf
-                        for (int i = 0; i < count; i++) {
-                            recvbuf[i] += tempbuf[i];
+                        if (!init_recv) {
+                            // Initialize the recvbuf with sendbuf data (local sum)
+                            for (int i = 0; i < count; i++) {
+                                recvbuf[i] = sendbuf[i] + tempbuf[i];
+                            }
+                            init_recv = true;
+                        } else {
+                            // Sum the received buffer into recvbuf
+                            for (int i = 0; i < count; i++) {
+                                recvbuf[i] += tempbuf[i];
+                            }
                         }
-                        free(tempbuf);
                     }
                 } else {
                     // This process will send its data to the paired process (rank - step)
-                    MPI_Send(recvbuf, count, MPI_INT, rank - step, 0, MPI_COMM_WORLD);
+                    if (!init_recv)
+                        MPI_Send(sendbuf, count, MPI_INT, rank - step, 0, MPI_COMM_WORLD);
+                    else
+                        MPI_Send(recvbuf, count, MPI_INT, rank - step, 0, MPI_COMM_WORLD);
                     break;  // Exit after sending
                 }
                 step *= 2;
             }
+            free(tempbuf);
         #else
             int rank, size;
     
@@ -106,34 +126,52 @@ void YOUR_Reduce(const int *sendbuf, int *recvbuf, int count) {
                 int manip_start = thread_id * count / num_threads;
                 int manip_end = (thread_id == num_threads - 1) ? count : (thread_id + 1) * count / num_threads;
                 int manip_count = manip_end - manip_start;
-                
-                // Step 1: Initialize the recvbuf with sendbuf data (local sum)
-                #pragma omp for
-                for (int i = 0; i < count; i++) {
-                    recvbuf[i] = sendbuf[i];
-                }
 
-                // Step 2: Binary tree reduction process
-                int step = 1;
-                while (step < size) {
-                    if (rank % (2 * step) == 0) {
-                        // This process will receive from its pair (rank + step)
-                        if (rank + step < size) {
-                            int *tempbuf = (int *)malloc(sizeof(int) * manip_count);
-                            MPI_Recv(tempbuf, manip_count, MPI_INT, rank + step, thread_id, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-                            
-                            // Sum the received buffer into recvbuf
-                            for (int i = manip_start; i < manip_end; i++) {
-                                recvbuf[i] += tempbuf[i - manip_start];
-                            }
-                            free(tempbuf);
+                // Special case for size = 2
+                if (size == 2) {
+                    if (rank == 0) {
+                        MPI_Recv(recvbuf + manip_start, manip_count, MPI_INT, 1, thread_id, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                        for (int i = manip_start; i < manip_end; i++) {
+                            recvbuf[i] += sendbuf[i];
                         }
                     } else {
-                        // This process will send its data to the paired process (rank - step)
-                        MPI_Send(recvbuf + manip_start, manip_count, MPI_INT, rank - step, thread_id, MPI_COMM_WORLD);
-                        break;  // Exit after sending
+                        // Process 1 sends its data to process 0
+                        MPI_Send(sendbuf + manip_start, manip_count, MPI_INT, 0, thread_id, MPI_COMM_WORLD);
                     }
-                    step *= 2;
+                } else {
+                    // Binary tree reduction process
+                    int step = 1;
+                    int *tempbuf = (int *)malloc(sizeof(int) * manip_count);
+                    bool init_recv = false;
+                    while (step < size) {
+                        if (rank % (2 * step) == 0) {
+                            // This process will receive from its pair (rank + step)
+                            if (rank + step < size) {
+                                MPI_Recv(tempbuf, manip_count, MPI_INT, rank + step, thread_id, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                                if (!init_recv) {
+                                    // Initialize the recvbuf with sendbuf data (local sum)
+                                    for (int i = 0; i < manip_count; i++) {
+                                        recvbuf[manip_start + i] = sendbuf[manip_start + i] + tempbuf[i];
+                                    }
+                                    init_recv = true;
+                                } else {
+                                    // Sum the received buffer into recvbuf
+                                    for (int i = 0; i < manip_count; i++) {
+                                        recvbuf[manip_start + i] += tempbuf[i];
+                                    }
+                                }
+                            }
+                        } else {
+                            // This process will send its data to the paired process (rank - step)
+                            if (!init_recv)
+                                MPI_Send(sendbuf + manip_start, manip_count, MPI_INT, rank - step, thread_id, MPI_COMM_WORLD);
+                            else
+                                MPI_Send(recvbuf + manip_start, manip_count, MPI_INT, rank - step, thread_id, MPI_COMM_WORLD);
+                            break;  // Exit after sending
+                        }
+                        step *= 2;
+                    }
+                    free(tempbuf);
                 }
             }
         #endif
@@ -143,6 +181,20 @@ void YOUR_Reduce(const int *sendbuf, int *recvbuf, int count) {
         // Get the rank of the process and the size of the communicator
         MPI_Comm_rank(MPI_COMM_WORLD, &rank);
         MPI_Comm_size(MPI_COMM_WORLD, &size);
+        
+        // Special case for size = 2
+        if (size == 2) {
+            if (rank == 0) {
+                MPI_Recv(recvbuf, count, MPI_INT, 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                for (int i = 0; i < count; i++) {
+                    recvbuf[i] += sendbuf[i];
+                }
+            } else {
+                // Process 1 sends its data to process 0
+                MPI_Send(sendbuf, count, MPI_INT, 0, 0, MPI_COMM_WORLD);
+            }
+            return;
+        }
 
         // Calculate the number of elements each process will work on
         int chunk_size = count / size;
@@ -151,31 +203,33 @@ void YOUR_Reduce(const int *sendbuf, int *recvbuf, int count) {
         // Each process calculates the local sum of its portion of the array
         int local_start = rank * chunk_size + (rank < remainder ? rank : remainder);
         int local_count = chunk_size + (rank < remainder ? 1 : 0);
-        
-        // Initialize the recvbuf to 0
-        for (int i = 0; i < count; i++) {
-            recvbuf[i] = 0;
-        }
+
+        int zero_count = chunk_size + (0 < remainder ? 1 : 0);
+        int remote_start, remote_count;
 
         // Calculate the chunk belong to this process and send other chunk to other processes
-        for (int i = 0; i < size; i++) {
-            int remote_start = i * chunk_size + (i < remainder ? i : remainder);
-            int remote_count = chunk_size + (i < remainder ? 1 : 0);
+        int *tempbuf = (int *)malloc(sizeof(int) * (chunk_size + 1));
+        bool init_recv = false;
+        if (rank != 0) {
+            for (int i = 1; i < size; i++) {
+                remote_start = i * chunk_size + (i < remainder ? i : remainder);
+                remote_count = chunk_size + (i < remainder ? 1 : 0);
 
-            if (i != rank) {
-                MPI_Send(sendbuf + remote_start, remote_count, MPI_INT, i, 0, MPI_COMM_WORLD);
-            } else {
-                for (int j = 0; j < size; j++) {
-                    if (j != rank) {
-                        int *tempbuf = (int *)malloc(sizeof(int) * remote_count);
+                if (i != rank) {
+                    MPI_Send(sendbuf + remote_start, remote_count, MPI_INT, i, 0, MPI_COMM_WORLD);
+                } else {
+                    for (int j = 1; j < size; j++) {
+                        if (j == rank) continue;
                         MPI_Recv(tempbuf, remote_count, MPI_INT, j, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-                        for (int k = 0; k < remote_count; k++) {
-                            recvbuf[local_start + k] += tempbuf[k];
-                        }
-                        free(tempbuf);
-                    } else {
-                        for (int k = 0; k < remote_count; k++) {
-                            recvbuf[local_start + k] += sendbuf[remote_start + k];
+                        if (!init_recv) {
+                            for (int k = 0; k < local_count; k++) {
+                                recvbuf[local_start + k] = sendbuf[local_start + k] + tempbuf[k];
+                            }
+                            init_recv = true;
+                        } else {
+                            for (int k = 0; k < local_count; k++) {
+                                recvbuf[local_start + k] += tempbuf[k];
+                            }
                         }
                     }
                 }
@@ -184,14 +238,29 @@ void YOUR_Reduce(const int *sendbuf, int *recvbuf, int count) {
 
         // Send the result back to process 0
         if (rank != 0) {
+            MPI_Send(sendbuf, zero_count, MPI_INT, 0, 0, MPI_COMM_WORLD);
             MPI_Send(recvbuf + local_start, local_count, MPI_INT, 0, 0, MPI_COMM_WORLD);
         } else {
+            MPI_Recv(tempbuf, zero_count, MPI_INT, 1, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            for (int i = 0; i < zero_count; i++) {
+                recvbuf[i] = tempbuf[i] + sendbuf[i];
+            }
+            for (int i = 2; i < size; i++) {
+                MPI_Recv(tempbuf, zero_count, MPI_INT, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                for (int j = 0; j < zero_count; j++) {
+                    recvbuf[j] += tempbuf[j];
+                }
+            }
             for (int i = 1; i < size; i++) {
-                int remote_start = i * chunk_size + (i < remainder ? i : remainder);
-                int remote_count = chunk_size + (i < remainder ? 1 : 0);
-                MPI_Recv(recvbuf + remote_start, remote_count, MPI_INT, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                remote_start = i * chunk_size + (i < remainder ? i : remainder);
+                remote_count = chunk_size + (i < remainder ? 1 : 0);
+                MPI_Recv(tempbuf, remote_count, MPI_INT, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                for (int j = 0; j < remote_count; j++) {
+                    recvbuf[remote_start + j] = tempbuf[j] + sendbuf[remote_start + j];
+                }
             }
         }
+        free(tempbuf);
 
     #endif
 #endif
